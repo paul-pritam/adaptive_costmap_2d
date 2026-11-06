@@ -155,9 +155,9 @@ TEST(BlockVisualizerTest, CreatesWireframesAndTelemetryHUD)
   // 2 blocks allocated * 8 points per block wireframe = 16 points
   EXPECT_EQ(wireframes.points.size(), 16UL);
 
-  const auto & fills = markers.markers[1];
-  EXPECT_EQ(fills.type, visualization_msgs::msg::Marker::CUBE_LIST);
-  EXPECT_EQ(fills.points.size(), 2UL);
+  const auto & lethal = markers.markers[1];
+  EXPECT_EQ(lethal.type, visualization_msgs::msg::Marker::POINTS);
+  EXPECT_EQ(lethal.points.size(), 1UL); // Exactly 1 lethal point set at (5, 5)
 
   const auto & hud = markers.markers[2];
   EXPECT_EQ(hud.type, visualization_msgs::msg::Marker::TEXT_VIEW_FACING);

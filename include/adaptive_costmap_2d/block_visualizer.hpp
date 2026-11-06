@@ -48,7 +48,7 @@ public:
     const double oy = grid.origin_y();
     const double tile_world_size = static_cast<double>(TileSize) * res;
 
-    // 1. Line List Marker for Block Wireframes
+    // 1. Line List Marker for Sparse Block Wireframes
     visualization_msgs::msg::Marker wireframes;
     wireframes.header.frame_id = frame_id;
     wireframes.header.stamp = stamp;
@@ -56,44 +56,38 @@ public:
     wireframes.id = 0;
     wireframes.type = visualization_msgs::msg::Marker::LINE_LIST;
     wireframes.action = visualization_msgs::msg::Marker::ADD;
-    wireframes.scale.x = 0.02; // Line width: 2cm
+    wireframes.scale.x = 0.012; // Crisp 1.2cm wireframe lines
 
-    // 2. Cube List Marker for Semi-Transparent Tile Fills
-    visualization_msgs::msg::Marker fills;
-    fills.header.frame_id = frame_id;
-    fills.header.stamp = stamp;
-    fills.ns = "adaptive_sparse_tiles";
-    fills.id = 1;
-    fills.type = visualization_msgs::msg::Marker::CUBE_LIST;
-    fills.action = visualization_msgs::msg::Marker::ADD;
-    fills.scale.x = tile_world_size - 0.02;
-    fills.scale.y = tile_world_size - 0.02;
-    fills.scale.z = 0.01;
+    // 2. Points Marker for Exact Lethal Obstacle Cells
+    visualization_msgs::msg::Marker lethal_cells;
+    lethal_cells.header.frame_id = frame_id;
+    lethal_cells.header.stamp = stamp;
+    lethal_cells.ns = "adaptive_lethal_cells";
+    lethal_cells.id = 1;
+    lethal_cells.type = visualization_msgs::msg::Marker::POINTS;
+    lethal_cells.action = visualization_msgs::msg::Marker::ADD;
+    lethal_cells.scale.x = res * 0.9;
+    lethal_cells.scale.y = res * 0.9;
 
-    // Colors
-    std_msgs::msg::ColorRGBA free_line_color;
-    free_line_color.r = 0.0f;
-    free_line_color.g = 0.85f;
-    free_line_color.b = 0.95f;
-    free_line_color.a = 0.75f;
+    std_msgs::msg::ColorRGBA red_color;
+    red_color.r = 0.95f;
+    red_color.g = 0.15f;
+    red_color.b = 0.15f;
+    red_color.a = 0.90f;
+    lethal_cells.color = red_color;
 
-    std_msgs::msg::ColorRGBA lethal_line_color;
-    lethal_line_color.r = 1.0f;
-    lethal_line_color.g = 0.2f;
-    lethal_line_color.b = 0.2f;
-    lethal_line_color.a = 0.95f;
+    // Wireframe Colors
+    std_msgs::msg::ColorRGBA free_wire_color;
+    free_wire_color.r = 0.0f;
+    free_wire_color.g = 0.85f;
+    free_wire_color.b = 0.85f;
+    free_wire_color.a = 0.45f;
 
-    std_msgs::msg::ColorRGBA free_fill_color;
-    free_fill_color.r = 0.0f;
-    free_fill_color.g = 0.8f;
-    free_fill_color.b = 0.8f;
-    free_fill_color.a = 0.15f;
-
-    std_msgs::msg::ColorRGBA lethal_fill_color;
-    lethal_fill_color.r = 1.0f;
-    lethal_fill_color.g = 0.1f;
-    lethal_fill_color.b = 0.1f;
-    lethal_fill_color.a = 0.35f;
+    std_msgs::msg::ColorRGBA boundary_wire_color;
+    boundary_wire_color.r = 0.2f;
+    boundary_wire_color.g = 0.85f;
+    boundary_wire_color.b = 0.4f;
+    boundary_wire_color.a = 0.65f;
 
     double sum_x = 0.0;
     double sum_y = 0.0;
@@ -116,12 +110,11 @@ public:
       count++;
 
       const bool has_lethal = block->has_lethal();
-      const auto & cur_line_color = has_lethal ? lethal_line_color : free_line_color;
-      const auto & cur_fill_color = has_lethal ? lethal_fill_color : free_fill_color;
+      const auto & cur_line_color = has_lethal ? boundary_wire_color : free_wire_color;
 
-      // 4 boundary lines per tile on z = 0.03
+      // 4 boundary lines per tile on z = 0.015 (subtle ground height)
       geometry_msgs::msg::Point p0, p1, p2, p3;
-      const double z_line = 0.03;
+      const double z_line = 0.015;
       p0.x = wx_min; p0.y = wy_min; p0.z = z_line;
       p1.x = wx_max; p1.y = wy_min; p1.z = z_line;
       p2.x = wx_max; p2.y = wy_max; p2.z = z_line;
@@ -151,17 +144,24 @@ public:
       wireframes.colors.push_back(cur_line_color);
       wireframes.colors.push_back(cur_line_color);
 
-      // Cube fill
-      geometry_msgs::msg::Point fill_pos;
-      fill_pos.x = center_x;
-      fill_pos.y = center_y;
-      fill_pos.z = 0.01;
-      fills.points.push_back(fill_pos);
-      fills.colors.push_back(cur_fill_color);
+      // Extract specific lethal cells inside this block
+      if (has_lethal) {
+        for (int ly = 0; ly < TileSize; ++ly) {
+          for (int lx = 0; lx < TileSize; ++lx) {
+            if (block->get(lx, ly) == 254) {
+              geometry_msgs::msg::Point pt;
+              pt.x = wx_min + (static_cast<double>(lx) + 0.5) * res;
+              pt.y = wy_min + (static_cast<double>(ly) + 0.5) * res;
+              pt.z = 0.02;
+              lethal_cells.points.push_back(pt);
+            }
+          }
+        }
+      }
     }
 
     array.markers.push_back(wireframes);
-    array.markers.push_back(fills);
+    array.markers.push_back(lethal_cells);
 
     // 3. Floating 3D Telemetry HUD Marker
     visualization_msgs::msg::Marker hud;
@@ -175,14 +175,14 @@ public:
     if (count > 0) {
       hud.pose.position.x = sum_x / static_cast<double>(count);
       hud.pose.position.y = sum_y / static_cast<double>(count);
-      hud.pose.position.z = 2.2; // 2.2m above floor
+      hud.pose.position.z = 2.0; // 2.0m above floor
     } else {
       hud.pose.position.x = ox;
       hud.pose.position.y = oy;
-      hud.pose.position.z = 2.2;
+      hud.pose.position.z = 2.0;
     }
 
-    hud.scale.z = 0.35; // Text size: 35cm height
+    hud.scale.z = 0.32; // Text size: 32cm height
     hud.color.r = 1.0f;
     hud.color.g = 0.95f;
     hud.color.b = 0.2f;
