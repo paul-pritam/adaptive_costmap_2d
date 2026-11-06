@@ -50,16 +50,24 @@ ament_target_dependencies(adaptive_costmap_2d_core
 
 pluginlib_export_plugin_description_file(nav2_costmap_2d plugins/adaptive_costmap_plugins.xml)
 
-# Standalone Empirical Benchmark Executable
+# Standalone Empirical Benchmark Executables
 add_executable(benchmark_memory_and_speed
   benchmark/benchmark_memory_and_speed.cpp
 )
-
 target_include_directories(benchmark_memory_and_speed PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-
 ament_target_dependencies(benchmark_memory_and_speed
+  nav_msgs
+)
+
+add_executable(benchmark_multires_lod
+  benchmark/benchmark_multires_lod.cpp
+)
+target_include_directories(benchmark_multires_lod PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+ament_target_dependencies(benchmark_multires_lod
   nav_msgs
 )
 
@@ -106,6 +114,23 @@ if(BUILD_TESTING)
     visualization_msgs
   )
 
+  ament_add_gtest(test_multi_res_grid
+    test/test_multi_res_grid.cpp
+  )
+  target_include_directories(test_multi_res_grid PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_link_libraries(test_multi_res_grid
+    GTest::gtest
+    GTest::gtest_main
+  )
+  ament_target_dependencies(test_multi_res_grid
+    rclcpp
+    geometry_msgs
+    nav_msgs
+    visualization_msgs
+  )
+
   ament_add_gtest(test_plugin_loading
     test/test_plugin_loading.cpp
   )
@@ -129,6 +154,7 @@ endif()
 install(TARGETS
   adaptive_costmap_2d_core
   benchmark_memory_and_speed
+  benchmark_multires_lod
   adaptive_mapping_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

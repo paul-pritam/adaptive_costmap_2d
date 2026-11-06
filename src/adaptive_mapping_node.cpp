@@ -28,6 +28,7 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 #include "adaptive_costmap_2d/sparse_grid_2d.hpp"
+#include "adaptive_costmap_2d/multi_res_grid_2d.hpp"
 #include "adaptive_costmap_2d/block_visualizer.hpp"
 
 namespace adaptive_costmap_2d
@@ -38,7 +39,8 @@ class AdaptiveMappingNode : public rclcpp::Node
 public:
   AdaptiveMappingNode()
   : Node("adaptive_mapping_node"),
-    sparse_grid_(0.05, 0.0, 0.0, 255) // Default: 255 (unknown)
+    sparse_grid_(0.05, 0.0, 0.0, 255),
+    multires_grid_(0.05, 0.0, 0.0, 255)
   {
     declare_parameter("scan_topic", std::string("/bcr_bot_1/scan"));
     declare_parameter("global_frame", std::string("map"));
@@ -48,6 +50,7 @@ public:
     declare_parameter("decay_expiry_sec", 8.0);
     declare_parameter("min_reinforcement_hits", 4);
     declare_parameter("enable_auto_prune", true);
+    declare_parameter("enable_multires_lod", true); // OctoMap-style multi-resolution LOD
 
     scan_topic_ = get_parameter("scan_topic").as_string();
     global_frame_ = get_parameter("global_frame").as_string();
@@ -57,8 +60,10 @@ public:
     decay_expiry_sec_ = get_parameter("decay_expiry_sec").as_double();
     min_reinforcement_hits_ = static_cast<uint32_t>(get_parameter("min_reinforcement_hits").as_int());
     enable_auto_prune_ = get_parameter("enable_auto_prune").as_bool();
+    enable_multires_lod_ = get_parameter("enable_multires_lod").as_bool();
 
     sparse_grid_ = SparseGrid2D<16>(resolution_, 0.0, 0.0, 255);
+    multires_grid_ = MultiResGrid2D<4>(resolution_, 0.0, 0.0, 255);
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -80,8 +85,8 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "AdaptiveMappingNode online. Subscribing to '%s', global frame '%s', resolution %.3fm",
-      scan_topic_.c_str(), global_frame_.c_str(), resolution_);
+      "AdaptiveMappingNode online. Subscribing to '%s', global frame '%s', resolution %.3fm (MultiRes LOD: %s)",
+      scan_topic_.c_str(), global_frame_.c_str(), resolution_, enable_multires_lod_ ? "ACTIVE" : "OFF");
   }
 
 private:
@@ -118,7 +123,11 @@ private:
     std::lock_guard<std::mutex> lock(grid_mutex_);
 
     int x0, y0;
-    sparse_grid_.world_to_cell(origin_x, origin_y, x0, y0);
+    if (enable_multires_lod_) {
+      multires_grid_.world_to_cell(origin_x, origin_y, x0, y0);
+    } else {
+      sparse_grid_.world_to_cell(origin_x, origin_y, x0, y0);
+    }
 
     const double angle_min = msg->angle_min;
     const double angle_inc = msg->angle_increment;
@@ -139,20 +148,30 @@ private:
       const double hit_y = origin_y + valid_r * std::sin(angle);
 
       int x1, y1;
-      sparse_grid_.world_to_cell(hit_x, hit_y, x1, y1);
+      if (enable_multires_lod_) {
+        multires_grid_.world_to_cell(hit_x, hit_y, x1, y1);
+      } else {
+        sparse_grid_.world_to_cell(hit_x, hit_y, x1, y1);
+      }
 
       const double scan_timestamp = static_cast<double>(msg->header.stamp.sec) +
                                      static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
 
-      // Hierarchical DDA raycasting clears free space
-      sparse_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp](int cx, int cy) {
-        // Free space = cost 0
-        this->sparse_grid_.set_cost(cx, cy, 0, scan_timestamp);
-      });
-
-      // Mark lethal obstacle at endpoint (cost 254)
-      if (is_hit) {
-        sparse_grid_.set_cost(x1, y1, 254, scan_timestamp);
+      if (enable_multires_lod_) {
+        // Multi-resolution hierarchical clearing & marking
+        multires_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp](int cx, int cy) {
+          this->multires_grid_.set_cost(cx, cy, 0, scan_timestamp);
+        });
+        if (is_hit) {
+          multires_grid_.set_cost(x1, y1, 254, scan_timestamp);
+        }
+      } else {
+        sparse_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp](int cx, int cy) {
+          this->sparse_grid_.set_cost(cx, cy, 0, scan_timestamp);
+        });
+        if (is_hit) {
+          sparse_grid_.set_cost(x1, y1, 254, scan_timestamp);
+        }
       }
     }
   }
@@ -161,36 +180,56 @@ private:
   {
     std::lock_guard<std::mutex> lock(grid_mutex_);
 
-    if (sparse_grid_.allocated_blocks_count() == 0) {
-      return;
-    }
-
     const auto stamp = this->now();
     const double current_sec = static_cast<double>(stamp.nanoseconds()) * 1e-9;
 
-    // 1. Temporal dynamic obstacle decay (decay unreinforced transients after timeout)
-    sparse_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_, min_reinforcement_hits_);
+    if (enable_multires_lod_) {
+      if (multires_grid_.allocated_blocks_count() == 0) {
+        return;
+      }
 
-    // 2. Periodic dynamic pruning of unreferenced blocks
-    if (enable_auto_prune_ && (current_sec - last_prune_sec_ > 10.0)) {
-      sparse_grid_.prune_unmodified_blocks();
-      last_prune_sec_ = current_sec;
+      multires_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_, min_reinforcement_hits_);
+
+      if (enable_auto_prune_ && (current_sec - last_prune_sec_ > 10.0)) {
+        multires_grid_.prune_unmodified_blocks();
+        last_prune_sec_ = current_sec;
+      }
+
+      const int w = multires_grid_.max_cell_x() - multires_grid_.min_cell_x() + 1;
+      const int h = multires_grid_.max_cell_y() - multires_grid_.min_cell_y() + 1;
+      auto markers = BlockVisualizer::create_multires_markers(
+        multires_grid_, global_frame_, stamp, w, h, wireframe_thickness_);
+      marker_pub_->publish(markers);
+
+      nav_msgs::msg::OccupancyGrid map_msg;
+      multires_grid_.to_occupancy_grid(map_msg, global_frame_, stamp);
+      map_pub_->publish(map_msg);
+    } else {
+      if (sparse_grid_.allocated_blocks_count() == 0) {
+        return;
+      }
+
+      sparse_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_, min_reinforcement_hits_);
+
+      if (enable_auto_prune_ && (current_sec - last_prune_sec_ > 10.0)) {
+        sparse_grid_.prune_unmodified_blocks();
+        last_prune_sec_ = current_sec;
+      }
+
+      const int w = sparse_grid_.max_cell_x() - sparse_grid_.min_cell_x() + 1;
+      const int h = sparse_grid_.max_cell_y() - sparse_grid_.min_cell_y() + 1;
+      auto markers = BlockVisualizer::create_markers(
+        sparse_grid_, global_frame_, stamp, w, h, wireframe_thickness_);
+      marker_pub_->publish(markers);
+
+      nav_msgs::msg::OccupancyGrid map_msg;
+      sparse_grid_.to_occupancy_grid(map_msg, global_frame_, stamp);
+      map_pub_->publish(map_msg);
     }
-
-    // 3. Publish Sparse Block Visualization Markers
-    const int w = sparse_grid_.max_cell_x() - sparse_grid_.min_cell_x() + 1;
-    const int h = sparse_grid_.max_cell_y() - sparse_grid_.min_cell_y() + 1;
-    auto markers = BlockVisualizer::create_markers(
-      sparse_grid_, global_frame_, stamp, w, h, wireframe_thickness_);
-    marker_pub_->publish(markers);
-
-    // 4. Publish OccupancyGrid using native sparse grid converter
-    nav_msgs::msg::OccupancyGrid map_msg;
-    sparse_grid_.to_occupancy_grid(map_msg, global_frame_, stamp);
-    map_pub_->publish(map_msg);
   }
 
   SparseGrid2D<16> sparse_grid_;
+  MultiResGrid2D<4> multires_grid_;
   std::mutex grid_mutex_;
 
   std::string scan_topic_{"/bcr_bot_1/scan"};
@@ -200,6 +239,7 @@ private:
   double decay_expiry_sec_{8.0};
   uint32_t min_reinforcement_hits_{4};
   bool enable_auto_prune_{true};
+  bool enable_multires_lod_{true};
   double last_prune_sec_{0.0};
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
