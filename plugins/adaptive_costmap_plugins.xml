@@ -1,0 +1,7 @@
+<class_libraries>
+  <library path="adaptive_costmap_2d_core">
+    <class type="adaptive_costmap_2d::AdaptiveCostmapLayer" base_class_type="nav2_costmap_2d::Layer">
+      <description>Adaptive Block-Sparse 2D Costmap Layer with hierarchical memory compression and block-leaping raycasting.</description>
+    </class>
+  </library>
+</class_libraries>
