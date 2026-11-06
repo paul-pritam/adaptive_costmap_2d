@@ -51,7 +51,7 @@ public:
     declare_parameter("min_reinforcement_hits", 4);
     declare_parameter("enable_auto_prune", true);
     declare_parameter("enable_multires_lod", true); // OctoMap-style multi-resolution LOD
-    declare_parameter("max_raytrace_clear_range", 5.0); // Clamps free-space clearing
+    declare_parameter("max_raytrace_clear_range", 16.0); // Clamps free-space clearing
     declare_parameter("min_motion_distance", 0.04);     // Motion threshold (m)
     declare_parameter("min_motion_angle", 0.035);       // Motion threshold (rad)
 
@@ -271,7 +271,7 @@ private:
   uint32_t min_reinforcement_hits_{4};
   bool enable_auto_prune_{true};
   bool enable_multires_lod_{true};
-  double max_raytrace_clear_range_{5.0};
+  double max_raytrace_clear_range_{16.0};
   double min_motion_distance_{0.04};
   double min_motion_angle_{0.035};
   double last_mapped_x_{0.0};
