@@ -51,6 +51,9 @@ public:
     declare_parameter("min_reinforcement_hits", 4);
     declare_parameter("enable_auto_prune", true);
     declare_parameter("enable_multires_lod", true); // OctoMap-style multi-resolution LOD
+    declare_parameter("max_raytrace_clear_range", 5.0); // Clamps free-space clearing
+    declare_parameter("min_motion_distance", 0.04);     // Motion threshold (m)
+    declare_parameter("min_motion_angle", 0.035);       // Motion threshold (rad)
 
     scan_topic_ = get_parameter("scan_topic").as_string();
     global_frame_ = get_parameter("global_frame").as_string();
@@ -61,6 +64,9 @@ public:
     min_reinforcement_hits_ = static_cast<uint32_t>(get_parameter("min_reinforcement_hits").as_int());
     enable_auto_prune_ = get_parameter("enable_auto_prune").as_bool();
     enable_multires_lod_ = get_parameter("enable_multires_lod").as_bool();
+    max_raytrace_clear_range_ = get_parameter("max_raytrace_clear_range").as_double();
+    min_motion_distance_ = get_parameter("min_motion_distance").as_double();
+    min_motion_angle_ = get_parameter("min_motion_angle").as_double();
 
     sparse_grid_ = SparseGrid2D<16>(resolution_, 0.0, 0.0, 255);
     multires_grid_ = MultiResGrid2D<4>(resolution_, 0.0, 0.0, 255);
@@ -122,6 +128,19 @@ private:
 
     std::lock_guard<std::mutex> lock(grid_mutex_);
 
+    // Stationary Jitter Smearing Filter: skip redundant scans if robot hasn't moved
+    if (has_mapped_before_) {
+      const double dist_moved = std::hypot(origin_x - last_mapped_x_, origin_y - last_mapped_y_);
+      const double yaw_diff = std::abs(std::remainder(yaw - last_mapped_yaw_, 2.0 * M_PI));
+      if (dist_moved < min_motion_distance_ && yaw_diff < min_motion_angle_) {
+        return;
+      }
+    }
+    last_mapped_x_ = origin_x;
+    last_mapped_y_ = origin_y;
+    last_mapped_yaw_ = yaw;
+    has_mapped_before_ = true;
+
     int x0, y0;
     if (enable_multires_lod_) {
       multires_grid_.world_to_cell(origin_x, origin_y, x0, y0);
@@ -142,7 +161,8 @@ private:
 
       const double angle = yaw + angle_min + static_cast<double>(i) * angle_inc;
       const bool is_hit = (r < range_max);
-      const double valid_r = is_hit ? r : range_max;
+      // Clamp free-space clearing distance so beams never blast into the void
+      const double valid_r = is_hit ? r : std::min(static_cast<double>(r), max_raytrace_clear_range_);
 
       const double hit_x = origin_x + valid_r * std::cos(angle);
       const double hit_y = origin_y + valid_r * std::sin(angle);
@@ -158,16 +178,27 @@ private:
                                      static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
 
       if (enable_multires_lod_) {
-        // Multi-resolution hierarchical clearing & marking
-        multires_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp](int cx, int cy) {
-          this->multires_grid_.set_cost(cx, cy, 0, scan_timestamp);
+        // Multi-resolution hierarchical clearing with PHYSICAL OCCLUSION:
+        // A ray stops immediately if it encounters a confirmed wall, and never clears it!
+        multires_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp, x1, y1](int cx, int cy) -> bool {
+          if (cx == x1 && cy == y1) {
+            return true; // Endpoint is handled separately
+          }
+          if (this->multires_grid_.is_confirmed_obstacle(cx, cy, 2)) {
+            return false; // Physical wall occludes ray: stop ray!
+          }
+          this->multires_grid_.mark_free(cx, cy, scan_timestamp, 2);
+          return true;
         });
+
         if (is_hit) {
-          multires_grid_.set_cost(x1, y1, 254, scan_timestamp);
+          multires_grid_.mark_obstacle(x1, y1, scan_timestamp);
         }
       } else {
-        sparse_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp](int cx, int cy) {
-          this->sparse_grid_.set_cost(cx, cy, 0, scan_timestamp);
+        sparse_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp, x1, y1](int cx, int cy) {
+          if (cx != x1 || cy != y1) {
+            this->sparse_grid_.set_cost(cx, cy, 0, scan_timestamp);
+          }
         });
         if (is_hit) {
           sparse_grid_.set_cost(x1, y1, 254, scan_timestamp);
@@ -240,6 +271,13 @@ private:
   uint32_t min_reinforcement_hits_{4};
   bool enable_auto_prune_{true};
   bool enable_multires_lod_{true};
+  double max_raytrace_clear_range_{5.0};
+  double min_motion_distance_{0.04};
+  double min_motion_angle_{0.035};
+  double last_mapped_x_{0.0};
+  double last_mapped_y_{0.0};
+  double last_mapped_yaw_{0.0};
+  bool has_mapped_before_{false};
   double last_prune_sec_{0.0};
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;

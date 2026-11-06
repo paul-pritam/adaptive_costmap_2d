@@ -167,6 +167,103 @@ struct alignas(32) QuadNode
     try_prune();
   }
 
+  void mark_obstacle(int lx, int ly, double stamp)
+  {
+    last_update_time = stamp;
+    has_lethal = true;
+
+    if (depth == 0) {
+      cost = 254;
+      ++reinforcement_hits;
+      return;
+    }
+
+    if (is_leaf) {
+      subdivide();
+    }
+
+    const int mid = 1 << (depth - 1);
+    const int cx = (lx >= mid) ? 1 : 0;
+    const int cy = (ly >= mid) ? 1 : 0;
+    const int idx = (cy << 1) | cx;
+    const int nlx = cx ? (lx - mid) : lx;
+    const int nly = cy ? (ly - mid) : ly;
+
+    (*children)[idx].mark_obstacle(nlx, nly, stamp);
+    has_lethal = true;
+  }
+
+  void mark_free(int lx, int ly, double stamp, uint32_t min_hits_to_resist = 3)
+  {
+    last_update_time = stamp;
+
+    if (depth == 0) {
+      // Confirmed obstacle resists clearing from a single free ray!
+      if (cost == 254 && reinforcement_hits >= min_hits_to_resist) {
+        return;
+      }
+      cost = 0;
+      has_lethal = false;
+      return;
+    }
+
+    if (is_leaf && cost == 0) {
+      return;
+    }
+
+    if (is_leaf) {
+      subdivide();
+    }
+
+    const int mid = 1 << (depth - 1);
+    const int cx = (lx >= mid) ? 1 : 0;
+    const int cy = (ly >= mid) ? 1 : 0;
+    const int idx = (cy << 1) | cx;
+    const int nlx = cx ? (lx - mid) : lx;
+    const int nly = cy ? (ly - mid) : ly;
+
+    (*children)[idx].mark_free(nlx, nly, stamp, min_hits_to_resist);
+
+    // Recompute lethal status of parent
+    has_lethal = false;
+    for (int i = 0; i < 4; ++i) {
+      if ((*children)[i].has_lethal) {
+        has_lethal = true;
+        break;
+      }
+    }
+
+    try_prune();
+  }
+
+  [[nodiscard]] bool is_confirmed_obstacle(int lx, int ly, uint32_t min_hits = 3) const noexcept
+  {
+    if (is_leaf || !children) {
+      return (cost == 254 && reinforcement_hits >= min_hits);
+    }
+    const int mid = 1 << (depth - 1);
+    const int cx = (lx >= mid) ? 1 : 0;
+    const int cy = (ly >= mid) ? 1 : 0;
+    const int idx = (cy << 1) | cx;
+    const int nlx = cx ? (lx - mid) : lx;
+    const int nly = cy ? (ly - mid) : ly;
+    return (*children)[idx].is_confirmed_obstacle(nlx, nly, min_hits);
+  }
+
+  [[nodiscard]] uint32_t get_hits(int lx, int ly) const noexcept
+  {
+    if (is_leaf || !children) {
+      return reinforcement_hits;
+    }
+    const int mid = 1 << (depth - 1);
+    const int cx = (lx >= mid) ? 1 : 0;
+    const int cy = (ly >= mid) ? 1 : 0;
+    const int idx = (cy << 1) | cx;
+    const int nlx = cx ? (lx - mid) : lx;
+    const int nly = cy ? (ly - mid) : ly;
+    return (*children)[idx].get_hits(nlx, nly);
+  }
+
   bool decay_ephemeral(double current_time, double expiry_sec, uint32_t min_hits = 4) noexcept
   {
     if (!has_lethal) {

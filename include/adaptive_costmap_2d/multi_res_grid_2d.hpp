@@ -149,6 +149,66 @@ public:
     update_bounds(cx, cy);
   }
 
+  inline void mark_free(int cx, int cy, double timestamp = 0.0, uint32_t min_hits_to_resist = 3)
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const uint64_t key = pack_key(bx, by);
+
+    auto it = macro_blocks_.find(key);
+    if (it == macro_blocks_.end()) {
+      auto new_root = std::make_unique<QuadNode>(ROOT_DEPTH, default_value_);
+      new_root->mark_free(lx, ly, timestamp, min_hits_to_resist);
+      macro_blocks_.emplace(key, std::move(new_root));
+    } else {
+      it->second->mark_free(lx, ly, timestamp, min_hits_to_resist);
+    }
+    update_bounds(cx, cy);
+  }
+
+  inline void mark_obstacle(int cx, int cy, double timestamp = 0.0)
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const uint64_t key = pack_key(bx, by);
+
+    auto it = macro_blocks_.find(key);
+    if (it == macro_blocks_.end()) {
+      auto new_root = std::make_unique<QuadNode>(ROOT_DEPTH, default_value_);
+      new_root->mark_obstacle(lx, ly, timestamp);
+      macro_blocks_.emplace(key, std::move(new_root));
+    } else {
+      it->second->mark_obstacle(lx, ly, timestamp);
+    }
+    update_bounds(cx, cy);
+  }
+
+  [[nodiscard]] inline bool is_confirmed_obstacle(int cx, int cy, uint32_t min_hits = 3) const noexcept
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const uint64_t key = pack_key(bx, by);
+
+    auto it = macro_blocks_.find(key);
+    if (it == macro_blocks_.end()) {
+      return false;
+    }
+    return it->second->is_confirmed_obstacle(lx, ly, min_hits);
+  }
+
+  [[nodiscard]] inline uint32_t get_hits(int cx, int cy) const noexcept
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const uint64_t key = pack_key(bx, by);
+
+    auto it = macro_blocks_.find(key);
+    if (it == macro_blocks_.end()) {
+      return 0;
+    }
+    return it->second->get_hits(lx, ly);
+  }
+
   inline void set_cost_world(double wx, double wy, uint8_t cost, double timestamp = 0.0)
   {
     int cx, cy;
@@ -169,7 +229,13 @@ public:
     int cy = y0;
 
     while (true) {
-      action(cx, cy);
+      if constexpr (std::is_invocable_r_v<bool, RayAction, int, int>) {
+        if (!action(cx, cy)) {
+          break; // Action returned false: abort ray (e.g. wall occlusion)
+        }
+      } else {
+        action(cx, cy);
+      }
 
       if (cx == x1 && cy == y1) {
         break;
@@ -368,7 +434,8 @@ public:
         if (cost == 0) {
           occ_val = 0;
         } else if (cost == 254) {
-          occ_val = 100;
+          const uint32_t hits = get_hits(cx, cy);
+          occ_val = (hits >= 2) ? 100 : 0;
         } else if (cost == 255) {
           occ_val = -1;
         } else {
