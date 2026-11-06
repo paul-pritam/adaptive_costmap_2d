@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include "adaptive_costmap_2d/sparse_block.hpp"
 #include "adaptive_costmap_2d/sparse_grid_2d.hpp"
+#include "adaptive_costmap_2d/block_visualizer.hpp"
 
 using namespace adaptive_costmap_2d;
 
@@ -133,4 +134,33 @@ TEST(SparseGridTest, BoundedMemorySavingsOver80Percent)
   EXPECT_EQ(dense_bytes, 4000000UL);
   EXPECT_LT(sparse_bytes, dense_bytes / 4); // Must be under 25% of dense footprint
   EXPECT_GT(savings, 0.75); // Greater than 75% memory savings
+}
+
+TEST(BlockVisualizerTest, CreatesWireframesAndTelemetryHUD)
+{
+  SparseGrid2D<16> grid(0.05, 0.0, 0.0, 255);
+
+  // Set lethal obstacle in block (0, 0)
+  grid.set_cost(5, 5, 254);
+  // Set free space in block (1, 0)
+  grid.set_cost(20, 5, 0);
+
+  auto markers = BlockVisualizer::create_markers(grid, "map", rclcpp::Time(0), 100, 100);
+
+  // Expect 3 markers: wireframes (LINE_LIST), fills (CUBE_LIST), and hud (TEXT_VIEW_FACING)
+  ASSERT_EQ(markers.markers.size(), 3UL);
+
+  const auto & wireframes = markers.markers[0];
+  EXPECT_EQ(wireframes.type, visualization_msgs::msg::Marker::LINE_LIST);
+  // 2 blocks allocated * 8 points per block wireframe = 16 points
+  EXPECT_EQ(wireframes.points.size(), 16UL);
+
+  const auto & fills = markers.markers[1];
+  EXPECT_EQ(fills.type, visualization_msgs::msg::Marker::CUBE_LIST);
+  EXPECT_EQ(fills.points.size(), 2UL);
+
+  const auto & hud = markers.markers[2];
+  EXPECT_EQ(hud.type, visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+  EXPECT_FALSE(hud.text.empty());
+  EXPECT_NE(hud.text.find("ADAPTIVE BLOCK-SPARSE 2D MAP"), std::string::npos);
 }

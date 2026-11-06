@@ -17,6 +17,7 @@ find_package(pluginlib REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
@@ -38,6 +39,7 @@ ament_target_dependencies(adaptive_costmap_2d_core
   geometry_msgs
   sensor_msgs
   nav_msgs
+  visualization_msgs
   tf2_ros
   tf2_geometry_msgs
 )
@@ -51,6 +53,25 @@ add_executable(benchmark_memory_and_speed
 
 target_include_directories(benchmark_memory_and_speed PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Standalone Adaptive Mapping Node
+add_executable(adaptive_mapping_node
+  src/adaptive_mapping_node.cpp
+)
+
+target_include_directories(adaptive_mapping_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+ament_target_dependencies(adaptive_mapping_node
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  nav_msgs
+  visualization_msgs
+  tf2_ros
+  tf2_geometry_msgs
 )
 
 # Testing
@@ -69,6 +90,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_sparse_grid
     GTest::gtest
     GTest::gtest_main
+  )
+  ament_target_dependencies(test_sparse_grid
+    rclcpp
+    geometry_msgs
+    visualization_msgs
   )
 
   ament_add_gtest(test_plugin_loading
@@ -94,6 +120,7 @@ endif()
 install(TARGETS
   adaptive_costmap_2d_core
   benchmark_memory_and_speed
+  adaptive_mapping_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -117,6 +144,7 @@ ament_export_dependencies(
   geometry_msgs
   sensor_msgs
   nav_msgs
+  visualization_msgs
   tf2_ros
   tf2_geometry_msgs
 )

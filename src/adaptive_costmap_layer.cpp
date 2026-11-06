@@ -57,6 +57,9 @@ void AdaptiveCostmapLayer::onInitialize()
     scan_topic_, rclcpp::SensorDataQoS(),
     std::bind(&AdaptiveCostmapLayer::laser_scan_callback, this, std::placeholders::_1));
 
+  block_markers_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
+    name_ + "/sparse_blocks", rclcpp::QoS(5));
+
   current_ = true;
   RCLCPP_INFO(
     node->get_logger(),
@@ -173,6 +176,14 @@ void AdaptiveCostmapLayer::laser_scan_callback(const sensor_msgs::msg::LaserScan
       node->get_logger(), *node->get_clock(), 5000,
       "[AdaptiveCostmap] Blocks: %zu | RAM: %zu KB vs Dense: %zu KB (%.1f%% memory savings)",
       alloc_blocks, sparse_kb, dense_kb, savings);
+
+    if (block_markers_pub_ && block_markers_pub_->get_subscription_count() > 0) {
+      auto markers = BlockVisualizer::create_markers(
+        sparse_grid_, global_frame_, msg->header.stamp,
+        static_cast<int>(master->getSizeInCellsX()),
+        static_cast<int>(master->getSizeInCellsY()));
+      block_markers_pub_->publish(markers);
+    }
   }
 }
 

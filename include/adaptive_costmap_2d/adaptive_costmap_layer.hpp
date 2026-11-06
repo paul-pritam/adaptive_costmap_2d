@@ -25,7 +25,9 @@
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 #include "adaptive_costmap_2d/sparse_grid_2d.hpp"
+#include "adaptive_costmap_2d/block_visualizer.hpp"
 
 namespace adaptive_costmap_2d
 {
@@ -61,6 +63,7 @@ private:
   std::recursive_mutex grid_mutex_;
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr block_markers_pub_;
   std::string scan_topic_{"/scan"};
   std::string global_frame_{"map"};
 
