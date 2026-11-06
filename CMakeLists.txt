@@ -21,6 +21,10 @@ find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
+if(EXISTS "/opt/ros/jazzy/include/karto_sdk")
+  include_directories(/opt/ros/jazzy/include/karto_sdk)
+endif()
+
 # Core Shared Library (Nav2 Costmap Layer Plugin)
 add_library(adaptive_costmap_2d_core SHARED
   src/adaptive_costmap_layer.cpp
@@ -53,6 +57,10 @@ add_executable(benchmark_memory_and_speed
 
 target_include_directories(benchmark_memory_and_speed PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+ament_target_dependencies(benchmark_memory_and_speed
+  nav_msgs
 )
 
 # Standalone Adaptive Mapping Node
@@ -94,6 +102,7 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_sparse_grid
     rclcpp
     geometry_msgs
+    nav_msgs
     visualization_msgs
   )
 

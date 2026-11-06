@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 
 namespace adaptive_costmap_2d
 {
@@ -40,11 +41,40 @@ struct alignas(64) SparseBlock
   uint32_t non_default_count{0};
   uint32_t lethal_count{0};
   uint8_t default_value{0};
+  double last_update_time{0.0};
+  uint32_t reinforcement_hits{0};
 
   explicit SparseBlock(uint8_t initial_val = 0)
   : default_value(initial_val)
   {
     cells.fill(initial_val);
+  }
+
+  inline void touch(double stamp, bool hit_obstacle = false) noexcept
+  {
+    last_update_time = stamp;
+    if (hit_obstacle) {
+      ++reinforcement_hits;
+    }
+  }
+
+  /**
+   * @brief Decays unreinforced ephemeral obstacles after an elapsed timeout.
+   *
+   * If an obstacle was observed with fewer than min_reinforcement_hits and has not
+   * been touched for expiry_sec, it is cleared to free space (cost 0).
+   */
+  inline bool decay_ephemeral(
+    double current_time, double expiry_sec, uint32_t min_reinforcement_hits = 4) noexcept
+  {
+    if (has_lethal() && reinforcement_hits < min_reinforcement_hits) {
+      if ((current_time - last_update_time) > expiry_sec) {
+        fill(0);
+        reinforcement_hits = 0;
+        return true;
+      }
+    }
+    return false;
   }
 
   [[nodiscard]] inline uint8_t get(int lx, int ly) const noexcept
@@ -83,6 +113,11 @@ struct alignas(64) SparseBlock
   }
 
   [[nodiscard]] inline bool is_uniform() const noexcept
+  {
+    return non_default_count == 0;
+  }
+
+  [[nodiscard]] inline bool can_prune() const noexcept
   {
     return non_default_count == 0;
   }

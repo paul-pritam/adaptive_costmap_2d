@@ -19,11 +19,14 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 #include <algorithm>
 
+#include "nav_msgs/msg/occupancy_grid.hpp"
+#include "builtin_interfaces/msg/time.hpp"
 #include "adaptive_costmap_2d/sparse_block.hpp"
 
 namespace adaptive_costmap_2d
@@ -124,7 +127,7 @@ public:
     return get_cost(cx, cy);
   }
 
-  inline void set_cost(int cx, int cy, uint8_t cost)
+  inline void set_cost(int cx, int cy, uint8_t cost, double timestamp = 0.0)
   {
     int bx, by, lx, ly;
     cell_to_block(cx, cy, bx, by, lx, ly);
@@ -137,19 +140,21 @@ public:
       }
       auto new_block = std::make_unique<BlockType>(default_value_);
       new_block->set(lx, ly, cost);
+      new_block->touch(timestamp, cost == 254);
       blocks_.emplace(key, std::move(new_block));
     } else {
       it->second->set(lx, ly, cost);
+      it->second->touch(timestamp, cost == 254);
     }
 
     update_bounds(cx, cy);
   }
 
-  inline void set_cost_world(double wx, double wy, uint8_t cost)
+  inline void set_cost_world(double wx, double wy, uint8_t cost, double timestamp = 0.0)
   {
     int cx, cy;
     world_to_cell(wx, wy, cx, cy);
-    set_cost(cx, cy, cost);
+    set_cost(cx, cy, cost, timestamp);
   }
 
   [[nodiscard]] bool is_block_allocated(int bx, int by) const noexcept
@@ -201,11 +206,26 @@ public:
   }
 
   /**
-   * @brief Hierarchical 2D DDA raycaster with coarse empty block leaping.
+   * @brief Automatic garbage collection: deallocates blocks that match default_value.
    *
-   * Iterates along the ray from (x0, y0) to (x1, y1).
-   * For empty uniform blocks, jumps directly to the block exit boundary,
-   * bypassing cell-by-cell stepping across empty warehouse floors.
+   * Reclaims heap memory back to OS/allocator when areas revert to uniform empty.
+   */
+  size_t prune_unmodified_blocks()
+  {
+    size_t pruned = 0;
+    for (auto it = blocks_.begin(); it != blocks_.end(); ) {
+      if (it->second->can_prune()) {
+        it = blocks_.erase(it);
+        ++pruned;
+      } else {
+        ++it;
+      }
+    }
+    return pruned;
+  }
+
+  /**
+   * @brief Hierarchical 2D DDA raycaster with coarse empty block leaping.
    */
   template <typename RayAction>
   void raytrace(int x0, int y0, int x1, int y1, RayAction && action)
@@ -229,17 +249,14 @@ public:
       int bx = cx >> TILE_SHIFT;
       int by = cy >> TILE_SHIFT;
 
-      // If in a uniform block that is not the target block, attempt coarse block leap
       int target_bx = x1 >> TILE_SHIFT;
       int target_by = y1 >> TILE_SHIFT;
 
       uint8_t uniform_val = 0;
       if ((bx != target_bx || by != target_by) && is_block_uniform(bx, by, uniform_val)) {
-        // Leap to block boundary
         int next_bx_cell = (sx > 0) ? ((bx + 1) << TILE_SHIFT) - 1 : (bx << TILE_SHIFT);
         int next_by_cell = (sy > 0) ? ((by + 1) << TILE_SHIFT) - 1 : (by << TILE_SHIFT);
 
-        // Advance to closest boundary
         while ((cx != next_bx_cell || cy != next_by_cell) && (cx != x1 || cy != y1)) {
           int e2 = 2 * err;
           if (e2 > -dy) {
@@ -332,6 +349,186 @@ public:
   const std::unordered_map<uint64_t, std::unique_ptr<BlockType>, BlockCoordHash> & blocks() const noexcept
   {
     return blocks_;
+  }
+
+  // =========================================================================
+  // Standard Dense Grid API Parity (Costmap2D & SLAM Toolbox compatibility)
+  // =========================================================================
+
+  [[nodiscard]] unsigned int getSizeInCellsX() const noexcept
+  {
+    return (min_cell_x_ <= max_cell_x_) ? static_cast<unsigned int>(max_cell_x_ - min_cell_x_ + 1) : 0U;
+  }
+
+  [[nodiscard]] unsigned int getSizeInCellsY() const noexcept
+  {
+    return (min_cell_y_ <= max_cell_y_) ? static_cast<unsigned int>(max_cell_y_ - min_cell_y_ + 1) : 0U;
+  }
+
+  [[nodiscard]] double getSizeInMetersX() const noexcept
+  {
+    return static_cast<double>(getSizeInCellsX()) * resolution_;
+  }
+
+  [[nodiscard]] double getSizeInMetersY() const noexcept
+  {
+    return static_cast<double>(getSizeInCellsY()) * resolution_;
+  }
+
+  [[nodiscard]] double getOriginX() const noexcept { return origin_x_; }
+  [[nodiscard]] double getOriginY() const noexcept { return origin_y_; }
+  [[nodiscard]] double getResolution() const noexcept { return resolution_; }
+
+  [[nodiscard]] uint8_t getCost(unsigned int mx, unsigned int my) const noexcept
+  {
+    const int cx = min_cell_x_ + static_cast<int>(mx);
+    const int cy = min_cell_y_ + static_cast<int>(my);
+    return get_cost(cx, cy);
+  }
+
+  void setCost(unsigned int mx, unsigned int my, uint8_t cost, double timestamp = 0.0)
+  {
+    const int cx = min_cell_x_ + static_cast<int>(mx);
+    const int cy = min_cell_y_ + static_cast<int>(my);
+    set_cost(cx, cy, cost, timestamp);
+  }
+
+  bool worldToMap(double wx, double wy, unsigned int & mx, unsigned int & my) const noexcept
+  {
+    int cx, cy;
+    world_to_cell(wx, wy, cx, cy);
+    if (cx < min_cell_x_ || cy < min_cell_y_ || cx > max_cell_x_ || cy > max_cell_y_) {
+      return false;
+    }
+    mx = static_cast<unsigned int>(cx - min_cell_x_);
+    my = static_cast<unsigned int>(cy - min_cell_y_);
+    return true;
+  }
+
+  void mapToWorld(unsigned int mx, unsigned int my, double & wx, double & wy) const noexcept
+  {
+    const int cx = min_cell_x_ + static_cast<int>(mx);
+    const int cy = min_cell_y_ + static_cast<int>(my);
+    cell_to_world(cx, cy, wx, wy);
+  }
+
+  /**
+   * @brief Extracts a rectangular submap patch for fast scan-matching or local navigation.
+   */
+  void extract_submap(
+    int min_cx, int min_cy, int max_cx, int max_cy,
+    std::vector<uint8_t> & out_data, unsigned int & out_w, unsigned int & out_h) const
+  {
+    if (min_cx > max_cx || min_cy > max_cy) {
+      out_w = 0;
+      out_h = 0;
+      out_data.clear();
+      return;
+    }
+    out_w = static_cast<unsigned int>(max_cx - min_cx + 1);
+    out_h = static_cast<unsigned int>(max_cy - min_cy + 1);
+    out_data.resize(out_w * out_h);
+
+    for (unsigned int j = 0; j < out_h; ++j) {
+      const int cy = min_cy + static_cast<int>(j);
+      for (unsigned int i = 0; i < out_w; ++i) {
+        const int cx = min_cx + static_cast<int>(i);
+        out_data[j * out_w + i] = get_cost(cx, cy);
+      }
+    }
+  }
+
+  size_t decay_ephemeral_obstacles(
+    double current_time, double expiry_sec = 8.0, uint32_t min_hits = 4)
+  {
+    size_t decayed_blocks = 0;
+    for (auto & [key, block] : blocks_) {
+      if (block->decay_ephemeral(current_time, expiry_sec, min_hits)) {
+        ++decayed_blocks;
+      }
+    }
+    return decayed_blocks;
+  }
+
+  void to_occupancy_grid(
+    nav_msgs::msg::OccupancyGrid & msg,
+    const std::string & frame_id = "map",
+    const builtin_interfaces::msg::Time & stamp = builtin_interfaces::msg::Time()) const
+  {
+    const uint32_t w = getSizeInCellsX();
+    const uint32_t h = getSizeInCellsY();
+    msg.header.frame_id = frame_id;
+    msg.header.stamp = stamp;
+    msg.info.resolution = static_cast<float>(resolution_);
+    msg.info.width = w;
+    msg.info.height = h;
+
+    if (w == 0 || h == 0) {
+      msg.info.origin.position.x = origin_x_;
+      msg.info.origin.position.y = origin_y_;
+      msg.info.origin.position.z = 0.0;
+      msg.info.origin.orientation.w = 1.0;
+      msg.data.clear();
+      return;
+    }
+
+    double origin_wx, origin_wy;
+    cell_to_world(min_cell_x_, min_cell_y_, origin_wx, origin_wy);
+    msg.info.origin.position.x = origin_wx - 0.5 * resolution_;
+    msg.info.origin.position.y = origin_wy - 0.5 * resolution_;
+    msg.info.origin.position.z = 0.0;
+    msg.info.origin.orientation.w = 1.0;
+
+    msg.data.resize(w * h, -1);
+
+    for (uint32_t j = 0; j < h; ++j) {
+      const int cy = min_cell_y_ + static_cast<int>(j);
+      for (uint32_t i = 0; i < w; ++i) {
+        const int cx = min_cell_x_ + static_cast<int>(i);
+        const uint8_t cost = get_cost(cx, cy);
+
+        int8_t occ_val = -1;
+        if (cost == 0) {
+          occ_val = 0;
+        } else if (cost == 254) {
+          occ_val = 100;
+        } else if (cost == 255) {
+          occ_val = -1;
+        } else {
+          occ_val = static_cast<int8_t>((static_cast<int>(cost) * 100) / 254);
+        }
+        msg.data[j * w + i] = occ_val;
+      }
+    }
+  }
+
+  void from_occupancy_grid(const nav_msgs::msg::OccupancyGrid & msg)
+  {
+    clear();
+    resolution_ = static_cast<double>(msg.info.resolution);
+    origin_x_ = msg.info.origin.position.x;
+    origin_y_ = msg.info.origin.position.y;
+
+    const uint32_t w = msg.info.width;
+    const uint32_t h = msg.info.height;
+
+    for (uint32_t j = 0; j < h; ++j) {
+      for (uint32_t i = 0; i < w; ++i) {
+        const int8_t occ = msg.data[j * w + i];
+        if (occ < 0) {
+          continue; // Unexplored remains unallocated sentinel
+        }
+        uint8_t cost = 0;
+        if (occ == 0) {
+          cost = 0;
+        } else if (occ >= 100) {
+          cost = 254;
+        } else {
+          cost = static_cast<uint8_t>((static_cast<int>(occ) * 254) / 100);
+        }
+        set_cost(static_cast<int>(i), static_cast<int>(j), cost);
+      }
+    }
   }
 
 private:

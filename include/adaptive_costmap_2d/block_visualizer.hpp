@@ -19,6 +19,7 @@
 #include <vector>
 #include <iomanip>
 #include <sstream>
+#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 #include "visualization_msgs/msg/marker.hpp"
@@ -39,7 +40,8 @@ public:
     const std::string & frame_id = "map",
     const rclcpp::Time & stamp = rclcpp::Time(0),
     int dense_width_cells = 0,
-    int dense_height_cells = 0)
+    int dense_height_cells = 0,
+    double wireframe_thickness = 0.012)
   {
     visualization_msgs::msg::MarkerArray array;
 
@@ -56,7 +58,7 @@ public:
     wireframes.id = 0;
     wireframes.type = visualization_msgs::msg::Marker::LINE_LIST;
     wireframes.action = visualization_msgs::msg::Marker::ADD;
-    wireframes.scale.x = 0.012; // Crisp 1.2cm wireframe lines
+    wireframes.scale.x = wireframe_thickness; // Crisp wireframe lines
 
     // 2. Points Marker for Exact Lethal Obstacle Cells
     visualization_msgs::msg::Marker lethal_cells;
@@ -69,25 +71,25 @@ public:
     lethal_cells.scale.x = res * 0.9;
     lethal_cells.scale.y = res * 0.9;
 
-    std_msgs::msg::ColorRGBA red_color;
-    red_color.r = 0.95f;
-    red_color.g = 0.15f;
-    red_color.b = 0.15f;
-    red_color.a = 0.90f;
-    lethal_cells.color = red_color;
+    std_msgs::msg::ColorRGBA red_point_color;
+    red_point_color.r = 1.0f;
+    red_point_color.g = 0.15f;
+    red_point_color.b = 0.15f;
+    red_point_color.a = 0.95f;
+    lethal_cells.color = red_point_color;
 
     // Wireframe Colors
     std_msgs::msg::ColorRGBA free_wire_color;
     free_wire_color.r = 0.0f;
     free_wire_color.g = 0.85f;
-    free_wire_color.b = 0.85f;
-    free_wire_color.a = 0.45f;
+    free_wire_color.b = 0.95f;
+    free_wire_color.a = 0.40f;
 
-    std_msgs::msg::ColorRGBA boundary_wire_color;
-    boundary_wire_color.r = 0.2f;
-    boundary_wire_color.g = 0.85f;
-    boundary_wire_color.b = 0.4f;
-    boundary_wire_color.a = 0.65f;
+    std_msgs::msg::ColorRGBA obstacle_wire_color;
+    obstacle_wire_color.r = 1.0f;
+    obstacle_wire_color.g = 0.25f;
+    obstacle_wire_color.b = 0.15f;
+    obstacle_wire_color.a = 0.75f;
 
     double sum_x = 0.0;
     double sum_y = 0.0;
@@ -110,7 +112,7 @@ public:
       count++;
 
       const bool has_lethal = block->has_lethal();
-      const auto & cur_line_color = has_lethal ? boundary_wire_color : free_wire_color;
+      const auto & cur_line_color = has_lethal ? obstacle_wire_color : free_wire_color;
 
       // 4 boundary lines per tile on z = 0.015 (subtle ground height)
       geometry_msgs::msg::Point p0, p1, p2, p3;
@@ -175,14 +177,14 @@ public:
     if (count > 0) {
       hud.pose.position.x = sum_x / static_cast<double>(count);
       hud.pose.position.y = sum_y / static_cast<double>(count);
-      hud.pose.position.z = 2.0; // 2.0m above floor
+      hud.pose.position.z = 2.4; // 2.4m above floor
     } else {
       hud.pose.position.x = ox;
       hud.pose.position.y = oy;
-      hud.pose.position.z = 2.0;
+      hud.pose.position.z = 2.4;
     }
 
-    hud.scale.z = 0.32; // Text size: 32cm height
+    hud.scale.z = 0.28; // Text size: 28cm height
     hud.color.r = 1.0f;
     hud.color.g = 0.95f;
     hud.color.b = 0.2f;
@@ -206,12 +208,12 @@ public:
 
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(1);
-    ss << "[ ADAPTIVE BLOCK-SPARSE 2D MAP ]\n";
-    ss << "Allocated 16x16 Tiles: " << count << " (0.8m x 0.8m)\n";
+    ss << "=== ADAPTIVE BLOCK-SPARSE 2D MAP ===\n";
+    ss << "Allocated Tiles: " << count << " (0.8m x 0.8m) | Sentinels: Active\n";
     ss << "Sparse RAM: " << sparse_kb << " KB vs Dense: " << dense_kb << " KB\n";
-    ss << "Memory Savings: " << savings << "% | Sentinel Lookups: Active";
-    hud.text = ss.str();
+    ss << "Active Memory Savings: " << savings << "% | Temporal Dynamic Decay: Active";
 
+    hud.text = ss.str();
     array.markers.push_back(hud);
 
     return array;

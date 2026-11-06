@@ -44,11 +44,19 @@ public:
     declare_parameter("global_frame", std::string("map"));
     declare_parameter("resolution", 0.05);
     declare_parameter("publish_rate", 2.0); // 2 Hz
+    declare_parameter("wireframe_thickness", 0.012);
+    declare_parameter("decay_expiry_sec", 8.0);
+    declare_parameter("min_reinforcement_hits", 4);
+    declare_parameter("enable_auto_prune", true);
 
     scan_topic_ = get_parameter("scan_topic").as_string();
     global_frame_ = get_parameter("global_frame").as_string();
     resolution_ = get_parameter("resolution").as_double();
     const double publish_rate = get_parameter("publish_rate").as_double();
+    wireframe_thickness_ = get_parameter("wireframe_thickness").as_double();
+    decay_expiry_sec_ = get_parameter("decay_expiry_sec").as_double();
+    min_reinforcement_hits_ = static_cast<uint32_t>(get_parameter("min_reinforcement_hits").as_int());
+    enable_auto_prune_ = get_parameter("enable_auto_prune").as_bool();
 
     sparse_grid_ = SparseGrid2D<16>(resolution_, 0.0, 0.0, 255);
 
@@ -133,15 +141,18 @@ private:
       int x1, y1;
       sparse_grid_.world_to_cell(hit_x, hit_y, x1, y1);
 
+      const double scan_timestamp = static_cast<double>(msg->header.stamp.sec) +
+                                     static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+
       // Hierarchical DDA raycasting clears free space
-      sparse_grid_.raytrace(x0, y0, x1, y1, [this](int cx, int cy) {
+      sparse_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp](int cx, int cy) {
         // Free space = cost 0
-        this->sparse_grid_.set_cost(cx, cy, 0);
+        this->sparse_grid_.set_cost(cx, cy, 0, scan_timestamp);
       });
 
       // Mark lethal obstacle at endpoint (cost 254)
       if (is_hit) {
-        sparse_grid_.set_cost(x1, y1, 254);
+        sparse_grid_.set_cost(x1, y1, 254, scan_timestamp);
       }
     }
   }
@@ -155,65 +166,28 @@ private:
     }
 
     const auto stamp = this->now();
+    const double current_sec = static_cast<double>(stamp.nanoseconds()) * 1e-9;
 
-    // 1. Publish Sparse Block Visualization Markers
+    // 1. Temporal dynamic obstacle decay (decay unreinforced transients after timeout)
+    sparse_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_, min_reinforcement_hits_);
+
+    // 2. Periodic dynamic pruning of unreferenced blocks
+    if (enable_auto_prune_ && (current_sec - last_prune_sec_ > 10.0)) {
+      sparse_grid_.prune_unmodified_blocks();
+      last_prune_sec_ = current_sec;
+    }
+
+    // 3. Publish Sparse Block Visualization Markers
     const int w = sparse_grid_.max_cell_x() - sparse_grid_.min_cell_x() + 1;
     const int h = sparse_grid_.max_cell_y() - sparse_grid_.min_cell_y() + 1;
     auto markers = BlockVisualizer::create_markers(
-      sparse_grid_, global_frame_, stamp, w, h);
+      sparse_grid_, global_frame_, stamp, w, h, wireframe_thickness_);
     marker_pub_->publish(markers);
 
-    // 2. Publish OccupancyGrid
-    const int min_x = sparse_grid_.min_cell_x();
-    const int min_y = sparse_grid_.min_cell_y();
-    const int max_x = sparse_grid_.max_cell_x();
-    const int max_y = sparse_grid_.max_cell_y();
-
-      if (min_x > max_x || min_y > max_y) {
-        return;
-      }
-
-      const uint32_t width = static_cast<uint32_t>(max_x - min_x + 1);
-      const uint32_t height = static_cast<uint32_t>(max_y - min_y + 1);
-
-      nav_msgs::msg::OccupancyGrid map_msg;
-      map_msg.header.frame_id = global_frame_;
-      map_msg.header.stamp = stamp;
-
-      map_msg.info.resolution = static_cast<float>(resolution_);
-      map_msg.info.width = width;
-      map_msg.info.height = height;
-
-      double origin_wx, origin_wy;
-      sparse_grid_.cell_to_world(min_x, min_y, origin_wx, origin_wy);
-      map_msg.info.origin.position.x = origin_wx - 0.5 * resolution_;
-      map_msg.info.origin.position.y = origin_wy - 0.5 * resolution_;
-      map_msg.info.origin.position.z = 0.0;
-      map_msg.info.origin.orientation.w = 1.0;
-
-      map_msg.data.resize(width * height, -1);
-
-      for (uint32_t j = 0; j < height; ++j) {
-        const int cy = min_y + static_cast<int>(j);
-        for (uint32_t i = 0; i < width; ++i) {
-          const int cx = min_x + static_cast<int>(i);
-          const uint8_t cost = sparse_grid_.get_cost(cx, cy);
-
-          int8_t occ_val = -1;
-          if (cost == 0) {
-            occ_val = 0; // Free
-          } else if (cost == 254) {
-            occ_val = 100; // Lethal obstacle
-          } else if (cost == 255) {
-            occ_val = -1; // Unknown / unexplored
-          } else {
-            occ_val = static_cast<int8_t>((static_cast<int>(cost) * 100) / 254);
-          }
-          map_msg.data[j * width + i] = occ_val;
-        }
-      }
-
-      map_pub_->publish(map_msg);
+    // 4. Publish OccupancyGrid using native sparse grid converter
+    nav_msgs::msg::OccupancyGrid map_msg;
+    sparse_grid_.to_occupancy_grid(map_msg, global_frame_, stamp);
+    map_pub_->publish(map_msg);
   }
 
   SparseGrid2D<16> sparse_grid_;
@@ -222,6 +196,11 @@ private:
   std::string scan_topic_{"/bcr_bot_1/scan"};
   std::string global_frame_{"map"};
   double resolution_{0.05};
+  double wireframe_thickness_{0.012};
+  double decay_expiry_sec_{8.0};
+  uint32_t min_reinforcement_hits_{4};
+  bool enable_auto_prune_{true};
+  double last_prune_sec_{0.0};
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
