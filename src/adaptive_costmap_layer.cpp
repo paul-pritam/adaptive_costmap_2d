@@ -213,45 +213,24 @@ void AdaptiveCostmapLayer::updateCosts(
   const int bound_max_i = std::min(static_cast<int>(master_grid.getSizeInCellsX()), max_i);
   const int bound_max_j = std::min(static_cast<int>(master_grid.getSizeInCellsY()), max_j);
 
-  // Traverse through blocks intersecting the update window
-  const int start_bx = bound_min_i >> SparseGrid2D<16>::TILE_SHIFT;
-  const int end_bx = bound_max_i >> SparseGrid2D<16>::TILE_SHIFT;
-  const int start_by = bound_min_j >> SparseGrid2D<16>::TILE_SHIFT;
-  const int end_by = bound_max_j >> SparseGrid2D<16>::TILE_SHIFT;
+  for (int j = bound_min_j; j < bound_max_j; ++j) {
+    for (int i = bound_min_i; i < bound_max_i; ++i) {
+      double wx, wy;
+      master_grid.mapToWorld(
+        static_cast<unsigned int>(i), static_cast<unsigned int>(j), wx, wy);
+      const uint8_t sparse_cost = sparse_grid_.get_cost_world(wx, wy);
 
-  for (int by = start_by; by <= end_by; ++by) {
-    for (int bx = start_bx; bx <= end_bx; ++bx) {
-      if (!sparse_grid_.is_block_allocated(bx, by)) {
-        continue; // Skip entire empty blocks with zero overhead
+      if (sparse_cost == nav2_costmap_2d::NO_INFORMATION && !track_unknown_space_) {
+        continue;
       }
 
-      const int block_base_x = bx << SparseGrid2D<16>::TILE_SHIFT;
-      const int block_base_y = by << SparseGrid2D<16>::TILE_SHIFT;
-
-      const int lx_start = std::max(0, bound_min_i - block_base_x);
-      const int lx_end = std::min(SparseGrid2D<16>::TILE_SIZE - 1, bound_max_i - 1 - block_base_x);
-      const int ly_start = std::max(0, bound_min_j - block_base_y);
-      const int ly_end = std::min(SparseGrid2D<16>::TILE_SIZE - 1, bound_max_j - 1 - block_base_y);
-
-      for (int ly = ly_start; ly <= ly_end; ++ly) {
-        const int gy = block_base_y + ly;
-        for (int lx = lx_start; lx <= lx_end; ++lx) {
-          const int gx = block_base_x + lx;
-          const uint8_t sparse_cost = sparse_grid_.get_cost(gx, gy);
-
-          if (sparse_cost == nav2_costmap_2d::NO_INFORMATION && !track_unknown_space_) {
-            continue;
-          }
-
-          const uint8_t old_cost = master_grid.getCost(gx, gy);
-          if (old_cost == nav2_costmap_2d::NO_INFORMATION) {
-            master_grid.setCost(gx, gy, sparse_cost);
-          } else if (combination_method_ == 1) { // Max
-            master_grid.setCost(gx, gy, std::max(old_cost, sparse_cost));
-          } else { // Overwrite
-            master_grid.setCost(gx, gy, sparse_cost);
-          }
-        }
+      const uint8_t old_cost = master_grid.getCost(i, j);
+      if (old_cost == nav2_costmap_2d::NO_INFORMATION) {
+        master_grid.setCost(i, j, sparse_cost);
+      } else if (combination_method_ == 1) { // Max
+        master_grid.setCost(i, j, std::max(old_cost, sparse_cost));
+      } else { // Overwrite
+        master_grid.setCost(i, j, sparse_cost);
       }
     }
   }
