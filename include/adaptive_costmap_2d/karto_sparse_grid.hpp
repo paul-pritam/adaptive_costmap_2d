@@ -58,8 +58,12 @@ public:
   SparseKartoGrid(
     double resolution = 0.05,
     double origin_x = 0.0,
-    double origin_y = 0.0)
-  : sparse_grid_(resolution, origin_x, origin_y, 255), // Default 255 = unknown
+    double origin_y = 0.0,
+    uint32_t min_pass_through = 2,
+    double occupancy_threshold = 0.1)
+  : sparse_grid_(
+      resolution, origin_x, origin_y,
+      255, min_pass_through, occupancy_threshold),  // Default 255 = unknown
     resolution_(resolution),
     origin_x_(origin_x),
     origin_y_(origin_y)
@@ -94,7 +98,8 @@ public:
   }
 
 #ifdef ADAPTIVE_MAP_HAS_KARTO
-  [[nodiscard]] inline kt_int8u GetValue(const karto::Vector2<kt_int32s> & rGridCoordinate) const noexcept
+  [[nodiscard]] inline kt_int8u GetValue(
+    const karto::Vector2<kt_int32s> & rGridCoordinate) const noexcept
   {
     return static_cast<kt_int8u>(get_state(rGridCoordinate.GetX(), rGridCoordinate.GetY()));
   }
@@ -118,13 +123,58 @@ public:
   inline void raytrace_free_line(int x0, int y0, int x1, int y1, double timestamp = 0.0)
   {
     sparse_grid_.raytrace(x0, y0, x1, y1, [this, timestamp](int cx, int cy) {
-      this->sparse_grid_.set_cost(cx, cy, 0, timestamp);
+        this->sparse_grid_.set_cost(cx, cy, 0, timestamp);
     });
   }
 
   inline void mark_obstacle(int x, int y, double timestamp = 0.0)
   {
     sparse_grid_.set_cost(x, y, 254, timestamp);
+  }
+
+  inline void record_pass(int cx, int cy)
+  {
+    sparse_grid_.record_pass(cx, cy);
+  }
+
+  inline void record_hit(int cx, int cy)
+  {
+    sparse_grid_.record_hit(cx, cy);
+  }
+
+  [[nodiscard]] inline uint32_t get_passes(int cx, int cy) const noexcept
+  {
+    return sparse_grid_.get_passes(cx, cy);
+  }
+
+  [[nodiscard]] inline uint32_t get_hits(int cx, int cy) const noexcept
+  {
+    return sparse_grid_.get_hits(cx, cy);
+  }
+
+  inline void update_all_occupancy()
+  {
+    sparse_grid_.update_all_occupancy();
+  }
+
+  [[nodiscard]] inline uint32_t get_min_pass_through() const noexcept
+  {
+    return sparse_grid_.get_min_pass_through();
+  }
+
+  inline void set_min_pass_through(uint32_t val) noexcept
+  {
+    sparse_grid_.set_min_pass_through(val);
+  }
+
+  [[nodiscard]] inline double get_occupancy_threshold() const noexcept
+  {
+    return sparse_grid_.get_occupancy_threshold();
+  }
+
+  inline void set_occupancy_threshold(double val) noexcept
+  {
+    sparse_grid_.set_occupancy_threshold(val);
   }
 
   [[nodiscard]] unsigned int get_width_cells() const noexcept
@@ -167,8 +217,9 @@ public:
    */
   [[nodiscard]] size_t get_karto_dense_equivalent_bytes() const noexcept
   {
-    const size_t cells = static_cast<size_t>(get_width_cells()) * static_cast<size_t>(get_height_cells());
-    return cells * 9; // 1B state + 4B pass count + 4B hits count
+    const size_t cells = static_cast<size_t>(get_width_cells()) *
+      static_cast<size_t>(get_height_cells());
+    return cells * 9;  // 1B state + 4B pass count + 4B hits count
   }
 
   [[nodiscard]] double get_memory_savings_ratio() const noexcept

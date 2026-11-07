@@ -55,7 +55,7 @@ struct BlockCoordHash
  *
  * Empty warehouse regions and unexplored spaces are represented with 0 bytes of heap memory.
  */
-template <int TileSize = 16>
+template<int TileSize = 16>
 class SparseGrid2D
 {
 public:
@@ -68,11 +68,15 @@ public:
     double resolution = 0.05,
     double origin_x = 0.0,
     double origin_y = 0.0,
-    uint8_t default_value = 0)
+    uint8_t default_value = 0,
+    uint32_t min_pass_through = 2,
+    double occupancy_threshold = 0.1)
   : resolution_(resolution),
     origin_x_(origin_x),
     origin_y_(origin_y),
-    default_value_(default_value)
+    default_value_(default_value),
+    min_pass_through_(min_pass_through),
+    occupancy_threshold_(occupancy_threshold)
   {
   }
 
@@ -136,7 +140,7 @@ public:
     auto it = blocks_.find(key);
     if (it == blocks_.end()) {
       if (cost == default_value_) {
-        return; // Zero allocation for default values
+        return;  // Zero allocation for default values
       }
       auto new_block = std::make_unique<BlockType>(default_value_);
       new_block->set(lx, ly, cost);
@@ -155,6 +159,97 @@ public:
     int cx, cy;
     world_to_cell(wx, wy, cx, cy);
     set_cost(cx, cy, cost, timestamp);
+  }
+
+  // =========================================================================
+  // Probabilistic Parameter Accessors
+  // =========================================================================
+
+  void set_min_pass_through(uint32_t val) noexcept
+  {
+    min_pass_through_ = val;
+  }
+
+  [[nodiscard]] uint32_t get_min_pass_through() const noexcept
+  {
+    return min_pass_through_;
+  }
+
+  void set_occupancy_threshold(double val) noexcept
+  {
+    occupancy_threshold_ = val;
+  }
+
+  [[nodiscard]] double get_occupancy_threshold() const noexcept
+  {
+    return occupancy_threshold_;
+  }
+
+  // =========================================================================
+  // Probabilistic Hit & Pass Recording API
+  // =========================================================================
+
+  void record_pass(int cx, int cy)
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const uint64_t key = pack_key(bx, by);
+
+    auto it = blocks_.find(key);
+    if (it == blocks_.end()) {
+      auto new_block = std::make_unique<BlockType>(default_value_);
+      new_block->record_pass(lx, ly, min_pass_through_, occupancy_threshold_);
+      blocks_.emplace(key, std::move(new_block));
+    } else {
+      it->second->record_pass(lx, ly, min_pass_through_, occupancy_threshold_);
+    }
+    update_bounds(cx, cy);
+  }
+
+  void record_hit(int cx, int cy)
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const uint64_t key = pack_key(bx, by);
+
+    auto it = blocks_.find(key);
+    if (it == blocks_.end()) {
+      auto new_block = std::make_unique<BlockType>(default_value_);
+      new_block->record_hit(lx, ly, min_pass_through_, occupancy_threshold_);
+      blocks_.emplace(key, std::move(new_block));
+    } else {
+      it->second->record_hit(lx, ly, min_pass_through_, occupancy_threshold_);
+    }
+    update_bounds(cx, cy);
+  }
+
+  [[nodiscard]] uint32_t get_passes(int cx, int cy) const noexcept
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const auto it = blocks_.find(pack_key(bx, by));
+    if (it == blocks_.end()) {
+      return 0;
+    }
+    return it->second->get_passes(lx, ly);
+  }
+
+  [[nodiscard]] uint32_t get_hits(int cx, int cy) const noexcept
+  {
+    int bx, by, lx, ly;
+    cell_to_block(cx, cy, bx, by, lx, ly);
+    const auto it = blocks_.find(pack_key(bx, by));
+    if (it == blocks_.end()) {
+      return 0;
+    }
+    return it->second->get_hits(lx, ly);
+  }
+
+  void update_all_occupancy()
+  {
+    for (auto & [key, block] : blocks_) {
+      block->update_all_occupancy(min_pass_through_, occupancy_threshold_);
+    }
   }
 
   [[nodiscard]] bool is_block_allocated(int bx, int by) const noexcept
@@ -227,7 +322,7 @@ public:
   /**
    * @brief Hierarchical 2D DDA raycaster with coarse empty block leaping.
    */
-  template <typename RayAction>
+  template<typename RayAction>
   void raytrace(int x0, int y0, int x1, int y1, RayAction && action)
   {
     int dx = std::abs(x1 - x0);
@@ -240,7 +335,13 @@ public:
     int cy = y0;
 
     while (true) {
-      action(cx, cy);
+      if constexpr (std::is_invocable_r_v<bool, RayAction, int, int>) {
+        if (!action(cx, cy)) {
+          break;
+        }
+      } else {
+        action(cx, cy);
+      }
 
       if (cx == x1 && cy == y1) {
         break;
@@ -267,7 +368,13 @@ public:
             err += dx;
             cy += sy;
           }
-          action(cx, cy);
+          if constexpr (std::is_invocable_r_v<bool, RayAction, int, int>) {
+            if (!action(cx, cy)) {
+              return;
+            }
+          } else {
+            action(cx, cy);
+          }
           if ((cx >> TILE_SHIFT) != bx || (cy >> TILE_SHIFT) != by) {
             break;
           }
@@ -295,12 +402,14 @@ public:
   [[nodiscard]] size_t memory_bytes_used() const noexcept
   {
     const size_t block_bytes = blocks_.size() * sizeof(BlockType);
-    const size_t hash_overhead = blocks_.bucket_count() * sizeof(void*) +
-                                 blocks_.size() * (sizeof(uint64_t) + sizeof(void*));
+    const size_t hash_overhead = blocks_.bucket_count() * sizeof(void *) +
+      blocks_.size() * (sizeof(uint64_t) + sizeof(void *));
     return sizeof(*this) + block_bytes + hash_overhead;
   }
 
-  [[nodiscard]] size_t equivalent_dense_bytes(int min_x, int min_y, int max_x, int max_y) const noexcept
+  [[nodiscard]] size_t equivalent_dense_bytes(
+    int min_x, int min_y, int max_x,
+    int max_y) const noexcept
   {
     if (min_x > max_x || min_y > max_y) {
       return 0;
@@ -323,17 +432,19 @@ public:
     return 1.0 - (static_cast<double>(sparse) / static_cast<double>(dense));
   }
 
-  [[nodiscard]] double resolution() const noexcept { return resolution_; }
-  [[nodiscard]] double origin_x() const noexcept { return origin_x_; }
-  [[nodiscard]] double origin_y() const noexcept { return origin_y_; }
-  [[nodiscard]] uint8_t default_value() const noexcept { return default_value_; }
+  [[nodiscard]] double resolution() const noexcept {return resolution_;}
+  [[nodiscard]] double origin_x() const noexcept {return origin_x_;}
+  [[nodiscard]] double origin_y() const noexcept {return origin_y_;}
+  [[nodiscard]] uint8_t default_value() const noexcept {return default_value_;}
 
-  [[nodiscard]] int min_cell_x() const noexcept { return min_cell_x_; }
-  [[nodiscard]] int min_cell_y() const noexcept { return min_cell_y_; }
-  [[nodiscard]] int max_cell_x() const noexcept { return max_cell_x_; }
-  [[nodiscard]] int max_cell_y() const noexcept { return max_cell_y_; }
+  [[nodiscard]] int min_cell_x() const noexcept {return min_cell_x_;}
+  [[nodiscard]] int min_cell_y() const noexcept {return min_cell_y_;}
+  [[nodiscard]] int max_cell_x() const noexcept {return max_cell_x_;}
+  [[nodiscard]] int max_cell_y() const noexcept {return max_cell_y_;}
 
-  void get_world_bounds(double & min_x, double & min_y, double & max_x, double & max_y) const noexcept
+  void get_world_bounds(
+    double & min_x, double & min_y, double & max_x,
+    double & max_y) const noexcept
   {
     if (blocks_.empty()) {
       min_x = origin_x_;
@@ -346,7 +457,8 @@ public:
     cell_to_world(max_cell_x_, max_cell_y_, max_x, max_y);
   }
 
-  const std::unordered_map<uint64_t, std::unique_ptr<BlockType>, BlockCoordHash> & blocks() const noexcept
+  const std::unordered_map<uint64_t, std::unique_ptr<BlockType>,
+    BlockCoordHash> & blocks() const noexcept
   {
     return blocks_;
   }
@@ -357,12 +469,14 @@ public:
 
   [[nodiscard]] unsigned int getSizeInCellsX() const noexcept
   {
-    return (min_cell_x_ <= max_cell_x_) ? static_cast<unsigned int>(max_cell_x_ - min_cell_x_ + 1) : 0U;
+    return (min_cell_x_ <=
+           max_cell_x_) ? static_cast<unsigned int>(max_cell_x_ - min_cell_x_ + 1) : 0U;
   }
 
   [[nodiscard]] unsigned int getSizeInCellsY() const noexcept
   {
-    return (min_cell_y_ <= max_cell_y_) ? static_cast<unsigned int>(max_cell_y_ - min_cell_y_ + 1) : 0U;
+    return (min_cell_y_ <=
+           max_cell_y_) ? static_cast<unsigned int>(max_cell_y_ - min_cell_y_ + 1) : 0U;
   }
 
   [[nodiscard]] double getSizeInMetersX() const noexcept
@@ -375,9 +489,9 @@ public:
     return static_cast<double>(getSizeInCellsY()) * resolution_;
   }
 
-  [[nodiscard]] double getOriginX() const noexcept { return origin_x_; }
-  [[nodiscard]] double getOriginY() const noexcept { return origin_y_; }
-  [[nodiscard]] double getResolution() const noexcept { return resolution_; }
+  [[nodiscard]] double getOriginX() const noexcept {return origin_x_;}
+  [[nodiscard]] double getOriginY() const noexcept {return origin_y_;}
+  [[nodiscard]] double getResolution() const noexcept {return resolution_;}
 
   [[nodiscard]] uint8_t getCost(unsigned int mx, unsigned int my) const noexcept
   {
@@ -516,7 +630,7 @@ public:
       for (uint32_t i = 0; i < w; ++i) {
         const int8_t occ = msg.data[j * w + i];
         if (occ < 0) {
-          continue; // Unexplored remains unallocated sentinel
+          continue;  // Unexplored remains unallocated sentinel
         }
         uint8_t cost = 0;
         if (occ == 0) {
@@ -544,6 +658,8 @@ private:
   double origin_x_{0.0};
   double origin_y_{0.0};
   uint8_t default_value_{0};
+  uint32_t min_pass_through_{2};
+  double occupancy_threshold_{0.1};
 
   int min_cell_x_{1000000000};
   int min_cell_y_{1000000000};

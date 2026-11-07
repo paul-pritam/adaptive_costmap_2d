@@ -15,10 +15,11 @@
 #ifndef ADAPTIVE_COSTMAP_2D__SPARSE_BLOCK_HPP_
 #define ADAPTIVE_COSTMAP_2D__SPARSE_BLOCK_HPP_
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <algorithm>
+#include <limits>
 
 namespace adaptive_costmap_2d
 {
@@ -27,9 +28,10 @@ namespace adaptive_costmap_2d
  * @brief Fixed-size cache-aligned block tile storing a contiguous local 2D cell grid.
  *
  * Designed to fit cleanly across CPU L1 cache lines (64-byte aligned).
- * Default TileSize = 16 corresponds to a 256-byte tile (exactly 4 cache lines).
+ * Default TileSize = 16 corresponds to a 2,368-byte tile (exactly 37 CPU cache lines).
+ * Features per-cell pass and hit tracking for Karto SDK probabilistic occupancy estimation.
  */
-template <int TileSize = 16>
+template<int TileSize = 16>
 struct alignas(64) SparseBlock
 {
   static constexpr int SIZE = TileSize;
@@ -38,16 +40,24 @@ struct alignas(64) SparseBlock
   static constexpr int MASK = TileSize - 1;
 
   std::array<uint8_t, NUM_CELLS> cells;
+  std::array<uint32_t, NUM_CELLS> passes{};
+  std::array<uint32_t, NUM_CELLS> hits{};
   uint32_t non_default_count{0};
   uint32_t lethal_count{0};
   uint8_t default_value{0};
   double last_update_time{0.0};
   uint32_t reinforcement_hits{0};
 
+  /**
+   * @brief Construct a new sparse block initialized with default value.
+   * @param initial_val Sentinel value to initialize all cells (e.g. 255 for unknown, 0 for free).
+   */
   explicit SparseBlock(uint8_t initial_val = 0)
   : default_value(initial_val)
   {
     cells.fill(initial_val);
+    passes.fill(0);
+    hits.fill(0);
   }
 
   inline void touch(double stamp, bool hit_obstacle = false) noexcept
@@ -105,9 +115,93 @@ struct alignas(64) SparseBlock
     cells[idx] = val;
   }
 
+  /**
+   * @brief Get total ray pass count for a cell.
+   */
+  [[nodiscard]] inline uint32_t get_passes(int lx, int ly) const noexcept
+  {
+    return passes[(ly & MASK) * SIZE + (lx & MASK)];
+  }
+
+  /**
+   * @brief Get total obstacle hit count for a cell.
+   */
+  [[nodiscard]] inline uint32_t get_hits(int lx, int ly) const noexcept
+  {
+    return hits[(ly & MASK) * SIZE + (lx & MASK)];
+  }
+
+  /**
+   * @brief Evaluates probabilistic occupancy for a single cell matching Karto SDK UpdateCell().
+   */
+  inline void update_cell_occupancy(
+    int lx, int ly,
+    uint32_t min_pass_through = 2,
+    double occupancy_threshold = 0.1) noexcept
+  {
+    const int idx = (ly & MASK) * SIZE + (lx & MASK);
+    const uint32_t pass_cnt = passes[idx];
+    if (pass_cnt > min_pass_through) {
+      const uint32_t hit_cnt = hits[idx];
+      const double hit_ratio = static_cast<double>(hit_cnt) / static_cast<double>(pass_cnt);
+      const uint8_t new_cost = (hit_ratio > occupancy_threshold) ? 254 : 0;
+      set(lx, ly, new_cost);
+    }
+  }
+
+  /**
+   * @brief Recalculates occupancy across all cells in this tile.
+   */
+  inline void update_all_occupancy(
+    uint32_t min_pass_through = 2,
+    double occupancy_threshold = 0.1) noexcept
+  {
+    for (int ly = 0; ly < SIZE; ++ly) {
+      for (int lx = 0; lx < SIZE; ++lx) {
+        update_cell_occupancy(lx, ly, min_pass_through, occupancy_threshold);
+      }
+    }
+  }
+
+  /**
+   * @brief Records a laser beam passing through a local cell and updates occupancy.
+   */
+  inline void record_pass(
+    int lx, int ly,
+    uint32_t min_pass_through = 2,
+    double occupancy_threshold = 0.1) noexcept
+  {
+    const int idx = (ly & MASK) * SIZE + (lx & MASK);
+    if (passes[idx] < std::numeric_limits<uint32_t>::max()) {
+      ++passes[idx];
+    }
+    update_cell_occupancy(lx, ly, min_pass_through, occupancy_threshold);
+  }
+
+  /**
+   * @brief Records an obstacle hit in a local cell and updates occupancy.
+   */
+  inline void record_hit(
+    int lx, int ly,
+    uint32_t min_pass_through = 2,
+    double occupancy_threshold = 0.1) noexcept
+  {
+    const int idx = (ly & MASK) * SIZE + (lx & MASK);
+    if (passes[idx] < std::numeric_limits<uint32_t>::max()) {
+      ++passes[idx];
+    }
+    if (hits[idx] < std::numeric_limits<uint32_t>::max()) {
+      ++hits[idx];
+    }
+    touch(0.0, true);
+    update_cell_occupancy(lx, ly, min_pass_through, occupancy_threshold);
+  }
+
   inline void fill(uint8_t val) noexcept
   {
     cells.fill(val);
+    passes.fill(0);
+    hits.fill(0);
     non_default_count = (val == default_value) ? 0 : NUM_CELLS;
     lethal_count = (val == 254) ? NUM_CELLS : 0;
   }
@@ -132,6 +226,13 @@ struct alignas(64) SparseBlock
     return sizeof(SparseBlock<TileSize>);
   }
 };
+
+static_assert(
+  sizeof(SparseBlock<16>) == 2368,
+  "SparseBlock<16> must be exactly 2368 bytes (37 cache lines)");
+static_assert(
+  alignof(SparseBlock<16>) == 64,
+  "SparseBlock<16> must be 64-byte aligned");
 
 }  // namespace adaptive_costmap_2d
 

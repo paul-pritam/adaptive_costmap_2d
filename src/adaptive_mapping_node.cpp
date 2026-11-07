@@ -45,15 +45,17 @@ public:
     declare_parameter("scan_topic", std::string("/bcr_bot_1/scan"));
     declare_parameter("global_frame", std::string("map"));
     declare_parameter("resolution", 0.05);
-    declare_parameter("publish_rate", 2.0); // 2 Hz
+    declare_parameter("publish_rate", 2.0);  // 2 Hz
     declare_parameter("wireframe_thickness", 0.012);
     declare_parameter("decay_expiry_sec", 8.0);
     declare_parameter("min_reinforcement_hits", 4);
     declare_parameter("enable_auto_prune", true);
-    declare_parameter("enable_multires_lod", true); // OctoMap-style multi-resolution LOD
-    declare_parameter("max_raytrace_clear_range", 16.0); // Clamps free-space clearing
-    declare_parameter("min_motion_distance", 0.04);     // Motion threshold (m)
-    declare_parameter("min_motion_angle", 0.035);       // Motion threshold (rad)
+    declare_parameter("enable_multires_lod", true);  // OctoMap-style multi-resolution LOD
+    declare_parameter("max_raytrace_clear_range", 16.0);  // Clamps free-space clearing
+    declare_parameter("min_motion_distance", 0.04);       // Motion threshold (m)
+    declare_parameter("min_motion_angle", 0.035);         // Motion threshold (rad)
+    declare_parameter("min_pass_through", 2);             // Karto min passes before classification
+    declare_parameter("occupancy_threshold", 0.1);        // Karto hit ratio threshold (10%)
 
     scan_topic_ = get_parameter("scan_topic").as_string();
     global_frame_ = get_parameter("global_frame").as_string();
@@ -61,14 +63,33 @@ public:
     const double publish_rate = get_parameter("publish_rate").as_double();
     wireframe_thickness_ = get_parameter("wireframe_thickness").as_double();
     decay_expiry_sec_ = get_parameter("decay_expiry_sec").as_double();
-    min_reinforcement_hits_ = static_cast<uint32_t>(get_parameter("min_reinforcement_hits").as_int());
+    min_reinforcement_hits_ =
+      static_cast<uint32_t>(get_parameter("min_reinforcement_hits").as_int());
     enable_auto_prune_ = get_parameter("enable_auto_prune").as_bool();
     enable_multires_lod_ = get_parameter("enable_multires_lod").as_bool();
     max_raytrace_clear_range_ = get_parameter("max_raytrace_clear_range").as_double();
     min_motion_distance_ = get_parameter("min_motion_distance").as_double();
     min_motion_angle_ = get_parameter("min_motion_angle").as_double();
+    min_pass_through_ = get_parameter("min_pass_through").as_int();
+    if (min_pass_through_ < 0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Parameter min_pass_through (%d) cannot be negative; clamping to 0",
+        min_pass_through_);
+      min_pass_through_ = 0;
+    }
+    occupancy_threshold_ = get_parameter("occupancy_threshold").as_double();
+    if (occupancy_threshold_ <= 0.0 || occupancy_threshold_ >= 1.0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Parameter occupancy_threshold (%.3f) must be in (0.0, 1.0); clamping to [0.01, 0.99]",
+        occupancy_threshold_);
+      occupancy_threshold_ = std::max(0.01, std::min(0.99, occupancy_threshold_));
+    }
 
     sparse_grid_ = SparseGrid2D<16>(resolution_, 0.0, 0.0, 255);
+    sparse_grid_.set_min_pass_through(static_cast<uint32_t>(min_pass_through_));
+    sparse_grid_.set_occupancy_threshold(occupancy_threshold_);
     multires_grid_ = MultiResGrid2D<4>(resolution_, 0.0, 0.0, 255);
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -91,8 +112,10 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "AdaptiveMappingNode online. Subscribing to '%s', global frame '%s', resolution %.3fm (MultiRes LOD: %s)",
-      scan_topic_.c_str(), global_frame_.c_str(), resolution_, enable_multires_lod_ ? "ACTIVE" : "OFF");
+      "AdaptiveMappingNode online. Subscribing to '%s', global frame '%s', "
+      "res %.3fm (MultiRes LOD: %s)",
+      scan_topic_.c_str(), global_frame_.c_str(), resolution_,
+      enable_multires_lod_ ? "ACTIVE" : "OFF");
   }
 
 private:
@@ -162,7 +185,8 @@ private:
       const double angle = yaw + angle_min + static_cast<double>(i) * angle_inc;
       const bool is_hit = (r < range_max);
       // Clamp free-space clearing distance so beams never blast into the void
-      const double valid_r = is_hit ? r : std::min(static_cast<double>(r), max_raytrace_clear_range_);
+      const double valid_r = is_hit ? r : std::min(static_cast<double>(r),
+          max_raytrace_clear_range_);
 
       const double hit_x = origin_x + valid_r * std::cos(angle);
       const double hit_y = origin_y + valid_r * std::sin(angle);
@@ -175,33 +199,40 @@ private:
       }
 
       const double scan_timestamp = static_cast<double>(msg->header.stamp.sec) +
-                                     static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+        static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
 
       if (enable_multires_lod_) {
-        // Multi-resolution hierarchical clearing with PHYSICAL OCCLUSION:
-        // A ray stops immediately if it encounters a confirmed wall, and never clears it!
-        multires_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp, x1, y1](int cx, int cy) -> bool {
-          if (cx == x1 && cy == y1) {
-            return true; // Endpoint is handled separately
-          }
-          if (this->multires_grid_.is_confirmed_obstacle(cx, cy, 2)) {
-            return false; // Physical wall occludes ray: stop ray!
-          }
-          this->multires_grid_.mark_free(cx, cy, scan_timestamp, 2);
-          return true;
+        // Multi-resolution hierarchical clearing without artificial occlusion stopping:
+        // Full-beam ray traversal allows dynamic obstacles to clear naturally.
+        multires_grid_.raytrace(x0, y0, x1, y1,
+          [this, scan_timestamp, x1, y1](int cx, int cy) -> bool {
+            if (cx == x1 && cy == y1) {
+              return false;  // Endpoint is handled separately
+            }
+            this->multires_grid_.mark_free(cx, cy, scan_timestamp, 2);
+            return true;
         });
 
         if (is_hit) {
           multires_grid_.mark_obstacle(x1, y1, scan_timestamp);
         }
       } else {
-        sparse_grid_.raytrace(x0, y0, x1, y1, [this, scan_timestamp, x1, y1](int cx, int cy) {
-          if (cx != x1 || cy != y1) {
-            this->sparse_grid_.set_cost(cx, cy, 0, scan_timestamp);
-          }
+        // Probabilistic ray traversal matching Karto SDK logic:
+        // Ray occlusion stopping is removed; beams traverse full physical range.
+        // Intermediate cells accumulate pass-through counts; endpoints record hits
+        // if valid or passes if out-of-range/capped.
+        sparse_grid_.raytrace(x0, y0, x1, y1, [this, x1, y1](int cx, int cy) -> bool {
+            if (cx == x1 && cy == y1) {
+              return false;  // Endpoint handled separately
+            }
+            this->sparse_grid_.record_pass(cx, cy);
+            return true;
         });
+
         if (is_hit) {
-          sparse_grid_.set_cost(x1, y1, 254, scan_timestamp);
+          sparse_grid_.record_hit(x1, y1);
+        } else {
+          sparse_grid_.record_pass(x1, y1);
         }
       }
     }
@@ -219,7 +250,8 @@ private:
         return;
       }
 
-      multires_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_, min_reinforcement_hits_);
+      multires_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_,
+          min_reinforcement_hits_);
 
       if (enable_auto_prune_ && (current_sec - last_prune_sec_ > 10.0)) {
         multires_grid_.prune_unmodified_blocks();
@@ -240,7 +272,13 @@ private:
         return;
       }
 
-      sparse_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_, min_reinforcement_hits_);
+      // Synchronize probabilistic occupancy across all modified blocks
+      sparse_grid_.update_all_occupancy();
+
+      if (decay_expiry_sec_ > 0.0) {
+        sparse_grid_.decay_ephemeral_obstacles(current_sec, decay_expiry_sec_,
+            min_reinforcement_hits_);
+      }
 
       if (enable_auto_prune_ && (current_sec - last_prune_sec_ > 10.0)) {
         sparse_grid_.prune_unmodified_blocks();
@@ -274,6 +312,8 @@ private:
   double max_raytrace_clear_range_{16.0};
   double min_motion_distance_{0.04};
   double min_motion_angle_{0.035};
+  int min_pass_through_{2};
+  double occupancy_threshold_{0.1};
   double last_mapped_x_{0.0};
   double last_mapped_y_{0.0};
   double last_mapped_yaw_{0.0};
