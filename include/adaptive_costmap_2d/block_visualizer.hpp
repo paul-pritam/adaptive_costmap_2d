@@ -260,19 +260,19 @@ public:
     free_coarse_color.r = 0.0f;
     free_coarse_color.g = 0.85f;
     free_coarse_color.b = 0.95f;
-    free_coarse_color.a = 0.40f;
+    free_coarse_color.a = 0.80f;
 
     std_msgs::msg::ColorRGBA free_fine_color;
-    free_fine_color.r = 0.1f;
-    free_fine_color.g = 0.90f;
-    free_fine_color.b = 0.50f;
-    free_fine_color.a = 0.55f;
+    free_fine_color.r = 0.05f;
+    free_fine_color.g = 1.00f;
+    free_fine_color.b = 0.40f;
+    free_fine_color.a = 0.90f;
 
     std_msgs::msg::ColorRGBA obstacle_wire_color;
     obstacle_wire_color.r = 1.0f;
-    obstacle_wire_color.g = 0.20f;
-    obstacle_wire_color.b = 0.15f;
-    obstacle_wire_color.a = 0.80f;
+    obstacle_wire_color.g = 0.10f;
+    obstacle_wire_color.b = 0.10f;
+    obstacle_wire_color.a = 0.95f;
 
     std::vector<MultiResBox> boxes;
     grid.collect_multires_boxes(boxes);
@@ -294,17 +294,17 @@ public:
         geometry_msgs::msg::Point pt;
         pt.x = center_x;
         pt.y = center_y;
-        pt.z = 0.02;
+        pt.z = 0.10;
         lethal_cells.points.push_back(pt);
       } else if (b.depth >= 3) {
-        line_color = free_coarse_color; // Coarse open floor
+        line_color = free_coarse_color; // Coarse open floor (Cyan)
       } else {
-        line_color = free_fine_color;   // Finer subdivided floor near walls
+        line_color = free_fine_color;   // Finer subdivided floor near walls (Bright Emerald Green)
       }
 
       // 4 boundary lines per box
       geometry_msgs::msg::Point p0, p1, p2, p3;
-      const double z_line = 0.015;
+      const double z_line = 0.08;
       p0.x = b.wx_min; p0.y = b.wy_min; p0.z = z_line;
       p1.x = b.wx_max; p1.y = b.wy_min; p1.z = z_line;
       p2.x = b.wx_max; p2.y = b.wy_max; p2.z = z_line;
